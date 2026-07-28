@@ -24,35 +24,64 @@ Bench scorecards land in `scripts/bench/out/<label>-<ts>.json` — diff them.
 
 ---
 
-## Auth. SSO compatibility — Phase 0 (`scripts/auth-flow-probe.mjs`)
+## Auth. SSO compatibility — Phase 0 (`scripts/raw-http-auth-probe.mjs`)
 
-### E-AUTH0 — Can the fixed first-party client use user-driven SSO? 🔴 BUILT, NOT RUN
+### E-AUTH0 — Can raw HTTP drive enterprise user SSO? 🔴 BUILT, NOT RUN
 
-- **Hypotheses:** H-A1 through H-A4 in `hypotheses.md` §13.
+- **Hypotheses:** H-A1 through H-A5 in `hypotheses.md` §13.
 - **Why first:** the proxy uses Microsoft's fixed first-party Office Copilot client and
   undocumented Sydney scopes. We must prove the supported interaction before replacing
   the working credentials/TOTP path.
+- **Protocol:** `probe:auth` now uses Node `fetch()` directly for OIDC discovery,
+  device authorization, authorization-code + PKCE exchange, and refresh-token grants.
+  It parses JSON/JWT metadata itself and loads no authentication SDK. The former MSAL
+  probe remains available as `probe:auth:msal` for an A/B control.
+- **Enterprise:** Microsoft's Azure/Entra sign-in host is also the identity provider
+  for enterprise M365. `organizations` accepts only Entra work/school accounts; a
+  tenant ID/domain narrows the flow to one directory.
 - **Safety:** the probe is a dry-run unless `--execute` is present. It uses a new
-  throwaway MSAL cache under the OS temp directory, refuses the production cache,
-  redacts its JSON report, never reads `secrets.json`, and consumes **zero chat messages**.
+  throwaway raw refresh-token cache under the OS temp directory, refuses production
+  `msal-cache.json` and `secrets.json`, records HTTP field names/statuses rather than
+  values, redacts its JSON report, and consumes **zero chat messages**.
 
 Inspect the plan without contacting Microsoft:
 
 ```sh
-pnpm run probe:auth -- --method=browser
+pnpm run probe:auth -- --method=browser --authority=organizations
 pnpm run probe:auth -- --method=device-code --authority=organizations
+
+# Print the exact raw endpoint/method/form templates with secret placeholders.
+pnpm run probe:auth -- \
+  --method=device-code \
+  --authority=organizations \
+  --audiences=chat \
+  --show-http
+```
+
+Prove raw HTTP endpoint discovery without starting sign-in:
+
+```sh
+pnpm run probe:auth -- \
+  --authority=organizations \
+  --discovery-only \
+  --execute
 ```
 
 Run each arm separately, from a real terminal:
 
 ```sh
-# A1: preferred workstation flow — MSAL system-browser PKCE + loopback
-pnpm run probe:auth -- --method=browser --execute
+# A1: preferred workstation flow — raw HTTP OAuth + system-browser PKCE/loopback
+pnpm run probe:auth -- \
+  --method=browser \
+  --authority=organizations \
+  --audiences=chat \
+  --execute
 
-# A2: preferred SSH/headless flow — complete sign-in on any browser-capable device
+# A2: raw HTTP device authorization + token polling
 pnpm run probe:auth -- \
   --method=device-code \
   --authority=organizations \
+  --audiences=chat \
   --execute
 
 # A3: allow a second interaction if BAP/Power Platform cannot be acquired silently
@@ -63,25 +92,46 @@ pnpm run probe:auth -- \
   --execute
 
 # Compatibility arm ONLY if browser loopback and device code both fail.
-# The user drives a visible isolated browser; the script never fills credentials.
+# Playwright is only a user-agent that captures the registered nativeclient redirect;
+# endpoint discovery and the code/token exchange still use raw HTTP. No form filling.
 CHROMIUM_PATH="$(command -v chromium)" \
-pnpm run probe:auth -- --method=nativeclient-visible --execute
+pnpm run probe:auth -- \
+  --method=nativeclient-browser \
+  --authority=organizations \
+  --execute
+
+# A5 control: compare the raw implementation with the original MSAL probe.
+pnpm run probe:auth:msal -- \
+  --method=device-code \
+  --authority=organizations \
+  --audiences=chat \
+  --execute
 ```
 
 Repeat the browser/device-code arm with `--authority=common`,
 `--authority=organizations`, and (if appropriate) a tenant ID to settle H-A4.
 Use one arm per run so each begins with an independent cache.
 
-- **Read:** redacted reports land in `scripts/auth-flow-probe-out/run-*.json`.
-  For each audience, inspect `interactive`, `restartSilent`, and `silent`.
+- **Read:** raw redacted reports land in
+  `scripts/raw-http-auth-probe-out/run-*.json`. Inspect `httpTrace` to see each
+  parsed raw request's method, endpoint, status, request field names, response field
+  names, and OAuth error class. No field values are retained. For each audience,
+  inspect `interactive`, `restartSilent`, and `silent`.
   `status:"succeeded"` means every requested acquisition was available;
   `status:"partial"` identifies the exact audience that needs another interaction.
-- **Do not publish raw caches.** The automatic cache is deleted after the report.
-  `--keep-cache` exists only for local restart diagnosis.
+- **Do not publish raw caches.** They contain a refresh token. The automatic cache
+  is deleted after the report; `--keep-cache` exists only for local restart diagnosis.
 - **Cost:** Entra token requests only, **0 M365 chat messages**.
-- **Afterward:** record tenant conditions, MSAL version, method, authority, sample
-  size, error code, and redacted report pointer in §13. Promote only confirmed
-  behavior to `m365-copilot-api.md`.
+- **Transport boundary:** authentication is raw HTTP; M365 Copilot chat itself remains
+  SignalR over WebSocket and cannot be replaced with a plain HTTP POST.
+- **Protocol references:** Microsoft documents the raw
+  [authorization-code + PKCE flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow),
+  [device authorization grant](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code),
+  [OIDC discovery](https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc),
+  and [`offline_access` refresh scope](https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc).
+- **Afterward:** record tenant conditions, method, authority, Node version, sample
+  size, OAuth/AADSTS error code, redacted report pointer, and raw-vs-MSAL result in
+  §13. Promote only confirmed behavior to `m365-copilot-api.md`.
 
 ---
 
