@@ -29,40 +29,49 @@ than "we eyeballed one run." See §M (Methods) for the experimental rig.
 
 ---
 
-## 13. July 27 2026 — SSO-first authentication compatibility matrix
+## 13. July 27–28 2026 — SSO-first authentication compatibility matrix
 
 **Status:** probe built, live matrix not yet run. No claims in this section should be
 promoted to the API reference until backed by a redacted run result.
 
 **Premise.** Production auth is silent MSAL cache → stored email/password/TOTP →
-Playwright form automation. The desired architecture is silent cache → user-driven
-Microsoft SSO, with device code for headless hosts. The hard constraint is the fixed
-first-party Office Copilot client (`c0ab8ce9-e9a0-42e7-b064-33d422df41f1`) and its
-undocumented Sydney scopes; a normal project-owned app registration may not be able
-to request them.
+Playwright form automation. The desired architecture is isolated refresh-token state
+→ user-driven Microsoft SSO, with raw device authorization for headless hosts. The
+tool must discover endpoints, construct form-encoded requests, parse OAuth JSON/JWTs,
+rotate refresh tokens, and redact traces without MSAL. The hard constraint is the
+fixed first-party Office Copilot client
+(`c0ab8ce9-e9a0-42e7-b064-33d422df41f1`) and its undocumented Sydney scopes; a normal
+project-owned app registration may not be able to request them.
 
-**Probe (BUILT, not run):** `scripts/auth-flow-probe.mjs`, runnable as E-AUTH0 in
-`docs/experiments.md`. The script is inert without `--execute`, uses an isolated
-throwaway cache, never reads `secrets.json`, writes only redacted token metadata,
-and makes no M365 chat request.
+**Enterprise clarification.** Landing on `login.microsoftonline.com` is expected:
+Microsoft Entra ID (formerly Azure AD) authenticates enterprise M365. The
+`organizations` authority restricts sign-in to Entra work/school accounts; a tenant
+ID/domain restricts it further. This says nothing about the chat transport, which
+remains SignalR over WebSocket after authentication.
 
-### H-A1 — MSAL Node loopback/system-browser sign-in is accepted 🔴
+**Probe (BUILT, not run):** `scripts/raw-http-auth-probe.mjs`, runnable as E-AUTH0
+in `docs/experiments.md`. `probe:auth` uses raw HTTP and is inert without `--execute`;
+`probe:auth:msal` preserves the previous MSAL implementation as a control. Both use
+isolated throwaway caches, never read `secrets.json`, write only redacted metadata,
+and make no M365 chat request.
 
-**Hypothesis.** The first-party client registration accepts the loopback redirect
-used by `PublicClientApplication.acquireTokenInteractive()`, allowing a normal system
-browser + PKCE flow without Playwright or application-handled credentials.
+### H-A1 — Raw HTTP loopback/system-browser sign-in is accepted 🔴
 
-**Prediction.** `--method=browser --execute` returns a Sydney token, persists it to
-the isolated cache, and a newly constructed MSAL client immediately acquires the same
-audience silently.
+**Hypothesis.** The first-party client registration accepts a localhost loopback
+redirect constructed by the probe, allowing a normal system browser + PKCE while the
+tool performs discovery and code exchange through raw HTTP.
 
-**Falsification.** Entra rejects the loopback redirect (for example AADSTS50011), or
-MSAL cannot complete the callback even though user authentication succeeds.
+**Prediction.** `--method=browser --authority=organizations --execute` returns a
+Sydney token, persists an isolated refresh token, and a newly loaded cache immediately
+gets the same audience through a raw `refresh_token` POST.
+
+**Falsification.** Entra rejects the loopback redirect (for example AADSTS50011), the
+state/nonce check fails, or raw code exchange fails despite successful user sign-in.
 
 ### H-A2 — Device-code sign-in is enabled for the first-party client 🔴
 
-**Hypothesis.** `acquireTokenByDeviceCode()` is allowed for the Office Copilot public
-client with an `organizations` or tenant-specific authority.
+**Hypothesis.** Direct form POSTs to `/devicecode` and `/token` are allowed for the
+Office Copilot public client with an `organizations` or tenant-specific authority.
 
 **Prediction.** The device-code arm completes normal Microsoft authentication on
 another device and produces the same Sydney audience/scopes as the current PKCE path.
@@ -72,9 +81,9 @@ the flow, or the resulting token lacks the required audience/scopes.
 
 ### H-A3 — One interaction can prewarm agent-management audiences 🔴
 
-**Hypothesis.** After the first Chat interaction, the cached account/refresh-token
-state can silently acquire BAP and Power Platform tokens, because the fixed client is
-already preauthorized for them.
+**Hypothesis.** After the first Chat interaction, the raw refresh token can acquire
+BAP and Power Platform tokens with new form-encoded `refresh_token` grants, because
+the fixed client is already preauthorized for them.
 
 **Prediction.** `bap.silent.ok` and `powerplatform.silent.ok` are both true without
 `--incremental-interaction`.
@@ -94,16 +103,33 @@ same tenant/account; `organizations` avoids personal-account ambiguity.
 **Falsification.** Only `common` or a tenant-specific authority is accepted, or cache
 reuse/incremental acquisition differs materially.
 
+### H-A5 — Raw HTTP is behaviorally equivalent to the MSAL control 🔴
+
+**Hypothesis.** MSAL adds no client capability, broker assertion, or request detail
+required by this fixed public client; it is only constructing the same OAuth requests
+and managing refresh state.
+
+**Prediction.** Independent raw (`probe:auth`) and MSAL (`probe:auth:msal`) runs under
+the same authority/account return matching redacted `aud`, `azp`/`appid`, `tid`, `oid`,
+and scope sets, and both can reacquire the first audience without interaction.
+
+**Falsification.** MSAL succeeds while the raw flow returns a client-capability,
+broker, grant, or preauthorization error, or token claims/scopes materially differ.
+If falsified, capture field-name-only HTTP metadata and retain MSAL until the missing
+protocol element is understood; do not imitate undocumented SDK headers blindly.
+
 ### Phase 0 decision gate
 
-- **A1 + A2 pass:** browser SSO becomes the workstation default; device code becomes
-  the headless default.
+- **A1 + A2 + A5 pass:** raw browser SSO becomes the workstation default; raw device
+  code becomes the headless default.
 - **A1 fails, A2 passes:** device code becomes the universal supported default.
 - **A3 fails but incremental interaction passes:** explicit login prewarms all three
   audiences sequentially.
-- **A1 + A2 fail:** run `nativeclient-visible` once. It opens a visible isolated
-  browser and captures the existing native-client callback, but never fills forms.
-  Keep this only as a compatibility bridge.
+- **Raw fails but MSAL passes:** stop the raw migration and isolate the protocol
+  difference with the redacted HTTP trace.
+- **A1 + A2 fail:** run `nativeclient-browser` once. It opens a visible isolated
+  browser and captures the existing native-client callback, but never fills forms;
+  discovery and token exchange remain raw HTTP. Keep this only as a bridge.
 - **All user-driven methods fail:** stop the migration. Do not delete or silently
   bypass the legacy path; investigate client-registration constraints first.
 
