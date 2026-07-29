@@ -18,7 +18,7 @@ import {
   createRawTokenCache,
   discoverEndpoints,
   generatePkce,
-  LoopbackReceiver,
+  NATIVECLIENT_REDIRECT_URI,
   parseArgs,
   pollDeviceToken,
   readRawTokenCache,
@@ -98,6 +98,16 @@ describe("raw HTTP auth argument parsing", () => {
     );
     expect(templates).toContain("refresh_token=<redacted-refresh-token>");
     expect(templates).not.toContain("sensitive-refresh-token");
+  });
+
+  it("uses the registered nativeclient redirect for the default browser flow", () => {
+    const templates = buildHttpTemplates(
+      parseArgs(["--method=browser", "--audiences=chat", "--show-http"]),
+    ).join("\n");
+    expect(templates).toContain(
+      `redirect_uri=${NATIVECLIENT_REDIRECT_URI}`,
+    );
+    expect(templates).not.toContain("http://localhost");
   });
 
   it("accepts device code and the legacy nativeclient method alias", () => {
@@ -213,13 +223,16 @@ describe("raw HTTP OAuth construction and parsing", () => {
         challenge: "challenge",
         nonce: "nonce",
         prompt: "select_account",
-        redirectUri: "http://localhost:1234",
+        redirectUri: NATIVECLIENT_REDIRECT_URI,
         scopes: ["resource/scope", "openid", "offline_access"],
         state: "state",
       }),
     );
     expect(url.searchParams.get("client_id")).toBe(CLIENT_ID);
     expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      NATIVECLIENT_REDIRECT_URI,
+    );
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
     expect(url.searchParams.get("state")).toBe("state");
     expect(url.searchParams.get("nonce")).toBe("nonce");
@@ -426,7 +439,7 @@ describe("raw HTTP auth redaction and identity", () => {
   });
 });
 
-describe("raw HTTP auth dry-run and loopback", () => {
+describe("raw HTTP auth dry-run", () => {
   it("describes raw discovery, exchange, refresh, and redacted tracing", () => {
     const plan = buildDryRunPlan(
       parseArgs(["--incremental-interaction"]),
@@ -438,35 +451,4 @@ describe("raw HTTP auth dry-run and loopback", () => {
     expect(plan).not.toMatch(/MSAL/);
   });
 
-  it("captures a state-bound loopback authorization response", async () => {
-    const receiver = new LoopbackReceiver(5_000, "expected-state");
-    const redirectUri = await receiver.start();
-    const responsePromise = receiver.waitForResponse();
-    expect(redirectUri).toMatch(/^http:\/\/localhost:\d+$/);
-
-    const callback = await fetch(
-      `${redirectUri}?code=test-code&state=expected-state`,
-    );
-    expect(callback.status).toBe(200);
-    await expect(responsePromise).resolves.toMatchObject({
-      code: "test-code",
-      state: "expected-state",
-    });
-    receiver.close();
-  });
-
-  it("rejects a loopback state mismatch", async () => {
-    const receiver = new LoopbackReceiver(5_000, "expected-state");
-    const redirectUri = await receiver.start();
-    const responsePromise = receiver.waitForResponse();
-    const expectedRejection = expect(responsePromise).rejects.toThrow(
-      /state mismatch/,
-    );
-    const callback = await fetch(
-      `${redirectUri}?code=test-code&state=wrong-state`,
-    );
-    expect(callback.status).toBe(400);
-    await expectedRejection;
-    receiver.close();
-  });
 });
