@@ -25,14 +25,14 @@ than "we eyeballed one run." See §M (Methods) for the experimental rig.
 - §7 — Probe backlog, ordered by info-gain ÷ cost
 - §8 — Capability-expansion hypotheses (web-research dig: empty `optionsSets`, code interpreter, MCP actions, Claude tone, throttling levers, reference implementations)
 - §11 — Detection / anti-flagging science run (July 7 2026 — auto-reauth is loud AND probably useless)
-- §13 — SSO-first authentication compatibility matrix (July 27 2026)
+- §13 — SSO-first authentication compatibility matrix (July 27–29 2026)
 
 ---
 
-## 13. July 27–28 2026 — SSO-first authentication compatibility matrix
+## 13. July 27–29 2026 — SSO-first authentication compatibility matrix
 
-**Status:** probe built, live matrix not yet run. No claims in this section should be
-promoted to the API reference until backed by a redacted run result.
+**Status:** first live browser arm run. Random localhost callback falsified; registered
+nativeclient fix built but not yet rerun. Other claims remain unconfirmed.
 
 **Premise.** Production auth is silent MSAL cache → stored email/password/TOTP →
 Playwright form automation. The desired architecture is isolated refresh-token state
@@ -49,24 +49,34 @@ Microsoft Entra ID (formerly Azure AD) authenticates enterprise M365. The
 ID/domain restricts it further. This says nothing about the chat transport, which
 remains SignalR over WebSocket after authentication.
 
-**Probe (BUILT, not run):** `scripts/raw-http-auth-probe.mjs`, runnable as E-AUTH0
+**Probe:** `scripts/raw-http-auth-probe.mjs`, runnable as E-AUTH0
 in `docs/experiments.md`. `probe:auth` uses raw HTTP and is inert without `--execute`;
 `probe:auth:msal` preserves the previous MSAL implementation as a control. Both use
 isolated throwaway caches, never read `secrets.json`, write only redacted metadata,
 and make no M365 chat request.
 
-### H-A1 — Raw HTTP loopback/system-browser sign-in is accepted 🔴
+### H-A1 — Raw HTTP loopback/system-browser sign-in is accepted ❌ FALSIFIED
 
-**Hypothesis.** The first-party client registration accepts a localhost loopback
-redirect constructed by the probe, allowing a normal system browser + PKCE while the
-tool performs discovery and code exchange through raw HTTP.
+**Result (2026-07-29, n=1 enterprise account).** Federated enterprise SSO reached
+Microsoft Entra, which then returned `AADSTS50011` for the generated
+`http://localhost:<ephemeral-port>` callback. The fixed Microsoft client does not
+register that redirect, and we do not control its app registration.
 
-**Prediction.** `--method=browser --authority=organizations --execute` returns a
-Sydney token, persists an isolated refresh token, and a newly loaded cache immediately
-gets the same audience through a raw `refresh_token` POST.
+**Conclusion.** Do not retry or ask a tenant admin to add the URI: this is a
+Microsoft-owned application. Use its already-observed registered nativeclient redirect.
 
-**Falsification.** Entra rejects the loopback redirect (for example AADSTS50011), the
-state/nonce check fails, or raw code exchange fails despite successful user sign-in.
+### H-A1b — Raw HTTP + registered nativeclient browser sign-in is accepted 🔴
+
+**Hypothesis.** A user-driven Playwright browser can complete enterprise SSO against
+`https://login.microsoftonline.com/common/oauth2/nativeclient`, while the probe captures
+the transient callback request and performs discovery/code exchange through raw HTTP.
+
+**Prediction.** `--method=browser --authority=organizations --audiences=chat --execute`
+returns a Sydney token, persists an isolated refresh token, and immediately reacquires
+the audience through a raw `refresh_token` POST.
+
+**Falsification.** Entra rejects the registered nativeclient URI, callback state/nonce
+validation fails, or raw code exchange fails after the browser receives a code.
 
 ### H-A2 — Device-code sign-in is enabled for the first-party client 🔴
 
@@ -120,16 +130,16 @@ protocol element is understood; do not imitate undocumented SDK headers blindly.
 
 ### Phase 0 decision gate
 
-- **A1 + A2 + A5 pass:** raw browser SSO becomes the workstation default; raw device
+- **A1b + A2 + A5 pass:** raw browser SSO becomes the workstation default; raw device
   code becomes the headless default.
-- **A1 fails, A2 passes:** device code becomes the universal supported default.
+- **A1 is closed:** random localhost loopback is permanently removed from the probe.
+- **A1b fails, A2 passes:** device code becomes the universal supported default.
 - **A3 fails but incremental interaction passes:** explicit login prewarms all three
   audiences sequentially.
 - **Raw fails but MSAL passes:** stop the raw migration and isolate the protocol
   difference with the redacted HTTP trace.
-- **A1 + A2 fail:** run `nativeclient-browser` once. It opens a visible isolated
-  browser and captures the existing native-client callback, but never fills forms;
-  discovery and token exchange remain raw HTTP. Keep this only as a bridge.
+- **A1b + A2 fail:** stop the SSO migration and investigate the fixed client/resource
+  contract; do not restore the known-invalid localhost callback.
 - **All user-driven methods fail:** stop the migration. Do not delete or silently
   bypass the legacy path; investigate client-registration constraints first.
 
