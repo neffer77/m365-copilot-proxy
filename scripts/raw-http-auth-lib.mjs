@@ -8,7 +8,6 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -1025,10 +1024,7 @@ export function buildHttpTemplates(options) {
         })}`,
       );
     } else {
-      const redirectUri =
-        options.method === "nativeclient-browser"
-          ? NATIVECLIENT_REDIRECT_URI
-          : "http://localhost:<ephemeral-port>";
+      const redirectUri = NATIVECLIENT_REDIRECT_URI;
       templates.push(
         `GET ${authority}/oauth2/v2.0/authorize\n${readableForm({
           client_id: CLIENT_ID,
@@ -1068,112 +1064,4 @@ export function buildHttpTemplates(options) {
     );
   }
   return templates;
-}
-
-export class LoopbackReceiver {
-  constructor(timeoutMs, expectedState) {
-    this.timeoutMs = timeoutMs;
-    this.expectedState = expectedState;
-    this.server = null;
-    this.timer = null;
-    this.responsePromise = null;
-    this.resolveResponse = null;
-    this.rejectResponse = null;
-  }
-
-  async start() {
-    if (this.server) throw new Error("Loopback receiver already started");
-    this.responsePromise = new Promise((resolveResponse, rejectResponse) => {
-      this.resolveResponse = resolveResponse;
-      this.rejectResponse = rejectResponse;
-    });
-
-    this.server = createServer((request, response) => {
-      try {
-        if (!request.url) throw new Error("Missing loopback request URL");
-        const parsed = new URL(request.url, this.getRedirectUri());
-        const state = parsed.searchParams.get("state");
-        const code = parsed.searchParams.get("code");
-        const oauthError = parsed.searchParams.get("error");
-
-        if (!code && !oauthError) {
-          response.statusCode = 404;
-          response.end("Waiting for Microsoft authorization.");
-          return;
-        }
-        if (state !== this.expectedState) {
-          response.statusCode = 400;
-          response.end("Authorization state mismatch. Return to the terminal.");
-          this.finish(new Error("Microsoft authorization state mismatch"));
-          return;
-        }
-
-        response.statusCode = oauthError ? 400 : 200;
-        response.setHeader("content-type", "text/plain; charset=utf-8");
-        response.end(
-          oauthError
-            ? "Microsoft authorization failed. Return to the terminal."
-            : "Microsoft authorization completed. You can close this window.",
-        );
-        this.finish(null, Object.fromEntries(parsed.searchParams.entries()));
-      } catch (error) {
-        response.statusCode = 400;
-        response.end("Invalid Microsoft authorization response.");
-        this.finish(error);
-      }
-    });
-
-    await new Promise((resolveListen, rejectListen) => {
-      this.server.once("error", rejectListen);
-      this.server.listen(0, "127.0.0.1", resolveListen);
-    });
-    this.timer = setTimeout(() => {
-      this.finish(
-        new Error(
-          `System-browser authorization timed out after ${this.timeoutMs / 1000}s`,
-        ),
-      );
-    }, this.timeoutMs);
-    this.timer.unref?.();
-    return this.getRedirectUri();
-  }
-
-  getRedirectUri() {
-    if (!this.server?.listening) {
-      throw new Error("Loopback receiver is not listening");
-    }
-    const address = this.server.address();
-    if (!address || typeof address === "string") {
-      throw new Error("Loopback receiver returned an invalid address");
-    }
-    return `http://localhost:${address.port}`;
-  }
-
-  waitForResponse() {
-    if (!this.responsePromise) {
-      throw new Error("Loopback receiver has not started");
-    }
-    return this.responsePromise;
-  }
-
-  finish(error, value) {
-    if (!this.responsePromise) return;
-    const resolveResponse = this.resolveResponse;
-    const rejectResponse = this.rejectResponse;
-    this.responsePromise = null;
-    this.resolveResponse = null;
-    this.rejectResponse = null;
-    this.close();
-    if (error) rejectResponse(error);
-    else resolveResponse(value);
-  }
-
-  close() {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    if (!this.server) return;
-    this.server.close();
-    this.server.unref();
-    this.server = null;
-  }
 }
