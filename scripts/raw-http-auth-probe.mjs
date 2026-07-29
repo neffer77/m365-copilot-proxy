@@ -32,7 +32,6 @@ import {
   discoverEndpoints,
   exchangeAuthorizationCode,
   generatePkce,
-  LoopbackReceiver,
   NATIVECLIENT_REDIRECT_URI,
   OAuthProtocolError,
   parseArgs,
@@ -80,10 +79,10 @@ Options:
   --keep-cache              Retain an auto-created temporary cache
   --login-hint=<email>      Browser hint only; never persisted in the report
   --prompt=select_account|login|none
-  --no-open                 Print the authorization URL instead of launching it
-  --chromium=<path>         Chromium for nativeclient-browser
-  --browser-profile=<path>  Isolated persistent profile for nativeclient-browser
-  --headless-browser        Nativeclient fallback only; never fills credentials
+  --no-open                 Device code: print the URL instead of launching it
+  --chromium=<path>         Chromium for the browser flow
+  --browser-profile=<path>  Isolated persistent profile for the browser flow
+  --headless-browser        Reuse a preauthenticated browser profile headlessly
   --show-http               Dry-run: print redacted raw request templates
   --timeout=<seconds>       30-900 (default 180)
   --json-out=<path>         Redacted report destination
@@ -172,58 +171,6 @@ function callbackError(parameters) {
       subError: parameters.suberror,
     },
   );
-}
-
-async function acquireWithSystemBrowser({
-  endpoints,
-  options,
-  scopes,
-  trace,
-}) {
-  const state = randomOAuthValue();
-  const nonce = randomOAuthValue();
-  const { challenge, verifier } = generatePkce();
-  const receiver = new LoopbackReceiver(options.timeoutMs, state);
-  const redirectUri = await receiver.start();
-
-  try {
-    const authorizationUrl = buildAuthorizationUrl({
-      authorizationEndpoint: endpoints.authorizationEndpoint,
-      challenge,
-      loginHint: options.loginHint,
-      nonce,
-      prompt: options.prompt,
-      redirectUri,
-      scopes,
-      state,
-    });
-    recordBrowserAuthorization(trace, authorizationUrl, "system-browser");
-    await openSystemBrowser(
-      authorizationUrl,
-      options.noOpen,
-      "Microsoft Entra enterprise sign-in",
-    );
-    const parameters = await receiver.waitForResponse();
-    const oauthError = callbackError(parameters);
-    if (oauthError) throw oauthError;
-    if (!parameters.code) {
-      throw new Error("Microsoft loopback response returned no authorization code");
-    }
-
-    const tokenResponse = await exchangeAuthorizationCode({
-      code: parameters.code,
-      redirectUri,
-      scopes,
-      timeoutMs: options.timeoutMs,
-      tokenEndpoint: endpoints.tokenEndpoint,
-      trace,
-      verifier,
-    });
-    assertIdTokenNonce(tokenResponse, nonce);
-    return tokenResponse;
-  } finally {
-    receiver.close();
-  }
 }
 
 async function captureNativeclientResponse({
@@ -411,14 +358,6 @@ async function acquireInteractively({
   trace,
 }) {
   const scopes = requestScopesForAudience(audience);
-  if (options.method === "browser") {
-    return acquireWithSystemBrowser({
-      endpoints,
-      options,
-      scopes,
-      trace,
-    });
-  }
   if (options.method === "device-code") {
     return acquireWithDeviceCode({
       endpoints,
@@ -673,8 +612,13 @@ async function runMatrix({
 let options;
 try {
   options = parseArgs(process.argv.slice(2));
-  if (options.headlessBrowser && options.method !== "nativeclient-browser") {
-    throw new Error("--headless-browser requires --method=nativeclient-browser");
+  if (
+    options.headlessBrowser &&
+    !["browser", "nativeclient-browser"].includes(options.method)
+  ) {
+    throw new Error(
+      "--headless-browser requires --method=browser or --method=nativeclient-browser",
+    );
   }
 } catch (error) {
   console.error(`Argument error: ${error.message}\n`);
