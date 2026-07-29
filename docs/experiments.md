@@ -26,7 +26,7 @@ Bench scorecards land in `scripts/bench/out/<label>-<ts>.json` — diff them.
 
 ## Auth. SSO compatibility — Phase 0 (`scripts/raw-http-auth-probe.mjs`)
 
-### E-AUTH0 — Can raw HTTP drive enterprise user SSO? 🔴 BUILT, NOT RUN
+### E-AUTH0 — Can raw HTTP drive enterprise user SSO? 🟡 LOOPBACK FALSIFIED; FIX BUILT
 
 - **Hypotheses:** H-A1 through H-A5 in `hypotheses.md` §13.
 - **Why first:** the proxy uses Microsoft's fixed first-party Office Copilot client and
@@ -36,6 +36,12 @@ Bench scorecards land in `scripts/bench/out/<label>-<ts>.json` — diff them.
   device authorization, authorization-code + PKCE exchange, and refresh-token grants.
   It parses JSON/JWT metadata itself and loads no authentication SDK. The former MSAL
   probe remains available as `probe:auth:msal` for an A/B control.
+- **July 29 result:** an enterprise browser run reached federated SSO but Entra rejected
+  the generated `http://localhost:<port>` callback with `AADSTS50011`; this Microsoft-owned
+  client does not register that random loopback URI. The primary `browser` method now
+  uses the registered `https://login.microsoftonline.com/common/oauth2/nativeclient`
+  redirect and captures its transient navigation request in a user-driven Playwright
+  browser. Endpoint discovery and code/token exchange remain raw HTTP.
 - **Enterprise:** Microsoft's Azure/Entra sign-in host is also the identity provider
   for enterprise M365. `organizations` accepts only Entra work/school accounts; a
   tenant ID/domain narrows the flow to one directory.
@@ -70,7 +76,9 @@ pnpm run probe:auth -- \
 Run each arm separately, from a real terminal:
 
 ```sh
-# A1: preferred workstation flow — raw HTTP OAuth + system-browser PKCE/loopback
+# A1b: preferred workstation flow — raw HTTP OAuth + registered nativeclient PKCE
+# A visible isolated Chromium window opens; complete SSO/MFA yourself.
+CHROMIUM_PATH="$(command -v chromium)" \
 pnpm run probe:auth -- \
   --method=browser \
   --authority=organizations \
@@ -91,14 +99,24 @@ pnpm run probe:auth -- \
   --incremental-interaction \
   --execute
 
-# Compatibility arm ONLY if browser loopback and device code both fail.
-# Playwright is only a user-agent that captures the registered nativeclient redirect;
-# endpoint discovery and the code/token exchange still use raw HTTP. No form filling.
+# Optional: retain a private SSO browser profile, then reuse it headlessly.
 CHROMIUM_PATH="$(command -v chromium)" \
 pnpm run probe:auth -- \
-  --method=nativeclient-browser \
+  --method=browser \
   --authority=organizations \
+  --browser-profile="$HOME/.config/m365-copilot-proxy/sso-browser" \
   --execute
+
+# After that profile has usable SSO:
+CHROMIUM_PATH="$(command -v chromium)" \
+pnpm run probe:auth -- \
+  --method=browser \
+  --authority=organizations \
+  --browser-profile="$HOME/.config/m365-copilot-proxy/sso-browser" \
+  --headless-browser \
+  --execute
+
+# `--method=nativeclient-browser` remains a compatibility alias/path.
 
 # A5 control: compare the raw implementation with the original MSAL probe.
 pnpm run probe:auth:msal -- \
@@ -122,6 +140,8 @@ Use one arm per run so each begins with an independent cache.
 - **Do not publish raw caches.** They contain a refresh token. The automatic cache
   is deleted after the report; `--keep-cache` exists only for local restart diagnosis.
 - **Cost:** Entra token requests only, **0 M365 chat messages**.
+- **Known invalid arm:** do not send a random localhost redirect for this fixed client;
+  the July 29 enterprise run falsified it with `AADSTS50011`.
 - **Transport boundary:** authentication is raw HTTP; M365 Copilot chat itself remains
   SignalR over WebSocket and cannot be replaced with a plain HTTP POST.
 - **Protocol references:** Microsoft documents the raw
